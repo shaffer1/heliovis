@@ -3,6 +3,8 @@ import plotly.graph_objects as go
 import numpy as np
 import pymeshlab
 from scipy.spatial import Delaunay
+import vtkmodules.all as vtk
+import vtkmodules.util.numpy_support as numpy_support
 
 # Download data set from plotly repo
 #pts = np.loadtxt(np.DataSource().open('https://raw.githubusercontent.com/shaffer1/heliovis/main/minb.txt'))
@@ -11,6 +13,14 @@ from scipy.spatial import Delaunay
 #fig = go.Figure(data=[go.Mesh3d(x=x, y=y, z=z, color='lightpink', opacity=0.50)])
 #fig.show()
 import plotly.graph_objects as go
+
+#importing the os module
+import os
+
+#to get the current working directory
+directory = os.getcwd()
+
+print(directory)
 
 class timeStep:
   def __init__(self, timeID, minBs, start, stop,name):
@@ -21,6 +31,7 @@ class timeStep:
     self.x = self.minBs[0:,0]
     self.y = self.minBs[0:,1]
     self.z = self.minBs[0:,2]
+    self.numVertices = self.z.shape[0]
 
     self.minValx = np.min(self.x)
     self.maxValx = np.max(self.x)
@@ -38,6 +49,9 @@ class timeStep:
     self.varValz = np.var(self.z)
 
     self.ssdz= self.sumSqFromZ0()
+    self.triangulate2D()
+    self.numFaces = self.faces.shape[0]
+    #print("N V ", self.numVertices, " N F ", self.numFaces)
 
 
 
@@ -61,15 +75,57 @@ class timeStep:
   def sumSqFromLSBF(self):
       return None
   
-  def saveToOBJ(self,filename):
-      if (self.mesh == None):
-          self.triangulate2d()
+  def saveToFile(self,filename):
       self.ms.save_current_mesh(filename)
-      
-      
+      print("Writing out ", filename)
   
+  def exportToVTK(self, filename):
+
+    my_vtk_dataset = vtk.vtkUnstructuredGrid()
+
+    points = vtk.vtkPoints()
+    for id in range(self.numVertices):
+        points.InsertPoint(id, [self.x[id], self.y[id], self.z[id]])
+    my_vtk_dataset.SetPoints(points)
+
+
+    my_vtk_dataset.Allocate(self.numFaces)
+    for id in range(self.numFaces):
+        point_ids = [self.faces[id,0], self.faces[id,1],self.faces[id,2]]
+        my_vtk_dataset.InsertNextCell(vtk.VTK_TRIANGLE, 3, point_ids)
+
+    m = self.ms.current_mesh()
+    density = m.vertex_custom_scalar_attribute_array("Density")
+    pressure = m.vertex_custom_scalar_attribute_array("Pressure") 
+
+    data_type = vtk.VTK_DOUBLE
+    vtk_density = numpy_support.numpy_to_vtk(num_array=density, deep=True, array_type=data_type)
+    vtk_density.SetName("Density")
+    my_vtk_dataset.GetPointData().AddArray(vtk_density)
+
+    vtk_pressure = numpy_support.numpy_to_vtk(num_array=pressure, deep=True, array_type=data_type)
+    vtk_pressure.SetName("Pressure")
+    my_vtk_dataset.GetPointData().AddArray(vtk_pressure)
+    
+    writer = vtk.vtkXMLUnstructuredGridWriter()
+    writer.SetFileName(filename+".vtu")
+    writer.SetInputData(my_vtk_dataset)
+    writer.Write()
+    
+    return None
   
-   
+  def comuputeCurvature(self):
+      return None
+  
+      #generate_surface_reconstruction_screened_poisson
+      #compute_curvature_and_color_apss_per_vertex
+      #compute_curvature_principal_directions_per_vertex
+      #compute_scalar_by_discrete_curvature_per_vertex
+      #vertex_curvature_principal_dir1_matrix(self: pmeshlab.Mesh) 
+
+  
+ ################################################################# 
+ # Helper functions  
 
 def find_lsbf_plane(coords):
     # barycenter of the points
@@ -98,25 +154,41 @@ def find_dist_z0(coords):
 
 def create_timesteps(coords, numsteps, stepSet):
     for i in range(numsteps):
-        print("Making step", i)
-        stepSet.append(timeStep(i,coords, i*480, (i+1)*480, "HeidiFieldLine"))
+        stepSet.append(timeStep(i,coords, i*480, (i+1)*480, "HeidiTimeStep"))
 
-    
+def load_scalars(filename, stepSet):
+    File_data = np.loadtxt(filename , dtype=float,comments="#", skiprows=0, usecols=(5,6))
+    pressure = File_data[:,0]
+    density = File_data[:,1]
+    #FIGURE OUT SLICING!!
+    i=0
+    for step in stepSet:
+        #print("Step ", i, " scalar add")
+        tsP = pressure[i*480:(i+1)*480]
+        tsD = density[i*480:(i+1)*480]
+        i=i+1
+        #step.ms.print_status()
+        #print("Scalars ", tsP.size, " Vertices ", step.ms.current_mesh().vertex_number())
+        step.ms.current_mesh().add_vertex_custom_scalar_attribute(tsP, "Pressure")
+        step.ms.current_mesh().add_vertex_custom_scalar_attribute(tsD, "Density")
+
+
+######################################################################################
+# MAIN SCRIPT
 stepSet = []
 print("Start it up")
 # Text file data converted to integer data type
 File_data = np.loadtxt("HeidiFieldLineXYZ2.txt", dtype=float,comments="#", skiprows=0, usecols=(2,3,4))
-#print(File_data.shape)
 
 field_lines = np.array_split(File_data,File_data.shape[0]/5)
-#print(field_lines)
+
 print("Processing ", len(field_lines), " field lines")
 minb_pts=np.zeros((len(field_lines),3))
 line_num=0
 for line in field_lines:
     minb_pts[line_num] = line[2]
     line_num=line_num+1
-#print(minb_pts)
+
 find_dist_z0(minb_pts)
 
 create_timesteps(minb_pts,540,stepSet)
@@ -140,50 +212,11 @@ print("step ", tsIndex, " has variance ", maxVar)
 tsMaxVar.print()
 tsMaxVar.sumSqFromZ0()
 tsSSDz.print()
-tsSSDz.triangulate2D()
-tsSSDz.saveToOBJ("tstest.obj")
+load_scalars("h-clean.txt",stepSet)
+tsSSDz.saveToFile("tstest.ply")
+tsSSDz.exportToVTK("vtktest")
 
 
 
 #print(field_lines)
 
-"""
-fig = go.Figure(data=go.Scatter3d())
-
-i=0
-for line in field_lines:
-    #print("Line ", i)
-    if (i==0):
-        split_line = np.transpose(line)
-    #print(line)
-        xl = split_line[0] 
-        yl = split_line[1]
-        zl = split_line[2]
-        fig= go.Figure(data=go.Scatter3d(x=xl, y=yl,z=zl, mode='lines'))
-    else:
-        split_line = np.transpose(line)
-        xl = split_line[0] 
-        yl = split_line[1]
-        zl = split_line[2]
-        fig.add_trace(go.Scatter3d(x=xl, y=yl,z=zl, mode='lines'))
-    i=i+1
-    #if (i==2):
-     #       break
-
- fig = go.Figure(data=go.Cone(
-    x=[1, 2, 3],
-    y=[1, 2, 3],
-    z=[1, 2, 3],
-    u=[1, 0, 0],
-    v=[0, 3, 0],
-    w=[0, 0, 2],
-    sizemode="absolute",
-    sizeref=2,
-    anchor="tip")) 
-
-fig.update_layout(
-      scene=dict(domain_x=[0, 1],
-                 camera_eye=dict(x=-1.57, y=1.36, z=0.58)))
-
-fig.show()
-"""
