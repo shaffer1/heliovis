@@ -5,6 +5,9 @@ import pymeshlab
 from scipy.spatial import Delaunay
 import vtkmodules.all as vtk
 import vtkmodules.util.numpy_support as numpy_support
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from vtkmodules.numpy_interface import dataset_adapter as dsa
+import csv
 
 # Download data set from plotly repo
 #pts = np.loadtxt(np.DataSource().open('https://raw.githubusercontent.com/shaffer1/heliovis/main/minb.txt'))
@@ -53,7 +56,8 @@ class timeStep:
     self.numFaces = self.faces.shape[0]
     #print("N V ", self.numVertices, " N F ", self.numFaces)
 
-
+  def get_max_z(self):
+      return np.max(np.absolute(self.z))
 
   def print(self):
       print("Timestep ", self.timeID," Num points: ", self.minBs.shape[0])
@@ -78,6 +82,12 @@ class timeStep:
   def saveToFile(self,filename):
       self.ms.save_current_mesh(filename)
       print("Writing out ", filename)
+
+  def exportSurfaceDataToVTK(self,filename):
+    writer = vtk.vtkPolyDataWriter()
+    writer.SetFileName(filename+".vtk")
+    writer.SetInputData(self.my_vtk_polydata)
+    writer.Write()
   
   def exportToVTK(self, filename):
 
@@ -111,15 +121,68 @@ class timeStep:
     writer.SetFileName(filename+".vtu")
     writer.SetInputData(my_vtk_dataset)
     writer.Write()
+    print("Wrote ", filename+".vtu")
     
     return None
   
-  def comuputeCurvature(self):
-      return None
+  def computeCurvature(self):
+    print("Computing Curvature")
+    self.my_vtk_polydata = vtk.vtkPolyData()
+    triangles = vtk.vtkCellArray()
+    points = vtk.vtkPoints()
+
+    for id in range(self.numVertices):
+        points.InsertPoint(id, [self.x[id], self.y[id], self.z[id]])
+    self.my_vtk_polydata.SetPoints(points)
+
+    for id in range(self.numFaces):
+        triangle = vtk.vtkTriangle()
+        triangle.GetPointIds().SetId(0,self.faces[id,0])
+        triangle.GetPointIds().SetId(1,self.faces[id,1])
+        triangle.GetPointIds().SetId(2,self.faces[id,2])
+        triangles.InsertNextCell(triangle)
+    self.my_vtk_polydata.SetPolys(triangles)
+
+
+    curv = vtk.vtkCurvatures()
+    curv.SetInputData(self.my_vtk_polydata)
+    curv.SetCurvatureTypeToMean()
+    curv.Update()
+    pd = curv.GetOutput()
+    mcurve = vtk_to_numpy((pd.GetPointData().GetArray(0)))
+    
+    curv.SetCurvatureTypeToGaussian()
+    curv.Update()
+    pd = curv.GetOutput()
+    gcurve = vtk_to_numpy((pd.GetPointData().GetArray(0)))
+    
+    m = self.ms.current_mesh()
+    density = m.vertex_custom_scalar_attribute_array("Density")
+    pressure = m.vertex_custom_scalar_attribute_array("Pressure") 
+
+    data_type = vtk.VTK_DOUBLE
+    vtk_density = numpy_support.numpy_to_vtk(num_array=density, deep=True, array_type=data_type)
+    vtk_density.SetName("Density")
+    self.my_vtk_polydata.GetPointData().AddArray(vtk_density)
+
+    vtk_pressure = numpy_support.numpy_to_vtk(num_array=pressure, deep=True, array_type=data_type)
+    vtk_pressure.SetName("Pressure")
+    self.my_vtk_polydata.GetPointData().AddArray(vtk_pressure)
+
+    vtk_gaussian_curvature = numpy_support.numpy_to_vtk(num_array=gcurve, deep=True, array_type=data_type)
+    vtk_gaussian_curvature.SetName("Gaussian Curvature")
+    self.my_vtk_polydata.GetPointData().AddArray(vtk_gaussian_curvature)
+
+    vtk_mean_curvature = numpy_support.numpy_to_vtk(num_array=mcurve, deep=True, array_type=data_type)
+    vtk_mean_curvature.SetName("Mean Curvature")
+    self.my_vtk_polydata.GetPointData().AddArray(vtk_mean_curvature)  
+    
+    return np.max(mcurve)
+
   
       #generate_surface_reconstruction_screened_poisson
       #compute_curvature_and_color_apss_per_vertex
-      #compute_curvature_principal_directions_per_vertex
+      #compute_curvature_principal_directions_per_vertex#
       #compute_scalar_by_discrete_curvature_per_vertex
       #vertex_curvature_principal_dir1_matrix(self: pmeshlab.Mesh) 
 
@@ -192,31 +255,22 @@ for line in field_lines:
 find_dist_z0(minb_pts)
 
 create_timesteps(minb_pts,540,stepSet)
-tsIndex=-1
-tsCurIndex=0
-maxVar=0
-maxssdz=0
-tsSSDz=stepSet[0]
-tsMaxVar = stepSet[0] 
-for t in stepSet:
-    if t.varValz > maxVar:
-        tsIndex=tsCurIndex
-        maxVar=t.varValz
-        tsMaxVar=t
-    if t.ssdz> maxssdz:
-        maxssdz=t.ssdz
-        tsSSDz=t
-    tsCurIndex=tsCurIndex+1
 
-print("step ", tsIndex, " has variance ", maxVar)
-tsMaxVar.print()
-tsMaxVar.sumSqFromZ0()
-tsSSDz.print()
 load_scalars("h-clean.txt",stepSet)
-tsSSDz.saveToFile("tstest.ply")
-tsSSDz.exportToVTK("vtktest")
 
+i=0
+maxKTimeSeries =[]
+for step in stepSet:
+   maxk = step.computeCurvature()
+   maxz = step.get_max_z()
+   maxKTimeSeries.append([i,maxk,maxz])
+   step.exportSurfaceDataToVTK(step.name)
+   i=i+1
 
-
-#print(field_lines)
-
+# opening the csv file in 'w+' mode
+file = open('meank.csv', 'w+', newline ='')
+ 
+# writing the data into the file
+with file:    
+    write = csv.writer(file)
+    write.writerows(maxKTimeSeries)
